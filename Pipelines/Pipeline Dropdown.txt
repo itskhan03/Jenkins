@@ -1,0 +1,69 @@
+pipeline {
+    agent any
+    parameters {
+        string(name: 'DOCKER_IMAGE', defaultValue: '', description: 'Docker image to pull (e.g., registry.gitlab.com/wavetec-tempest/jwt-auth-server:vn-fix-5)')
+        choice(name: 'SERVICE_NAME', choices: ['', 'transaction', 'inventory', 'portal_frontend', 'portal_backend', 'auth_server'], description: 'Select the service name from docker-compose.yml')
+    }
+    environment {
+        DOCKER_REGISTRY = 'registry.gitlab.com'
+        CREDENTIALS_ID = 'gitlab-credentials'
+        LOCAL_REGISTRY_URL = '34.142.189.76:8000'
+        LOCAL_REGISTRY_CREDENTIALS = 'local-registry'
+        APP_SERVER_CREDENTIALS = 'app-server-credentials'  // Replace with the correct Jenkins credentials ID
+        APP_SERVER_HOST = '35.201.230.255'
+        APP_SERVER_DOCKER_COMPOSE_PATH = '/home/Portal/docker-compose.yml'
+        APP_SERVER_SSH_PORT = '2786' // Replace with your actual SSH port
+    }
+    stages {
+        stage('Pull and Push Docker Image') {
+            steps {
+                script {
+                    def dockerImage = params.DOCKER_IMAGE
+                    def serviceName = params.SERVICE_NAME
+                    if (!dockerImage?.trim() || !serviceName?.trim()) {
+                        error 'DOCKER_IMAGE and SERVICE_NAME parameters are required.'
+                    }
+                    def dockerImageName = dockerImage.split('/').last().split(':').first()
+                    def dockerImageTag = dockerImage.split(':').last()
+                    def localDockerImage = "${LOCAL_REGISTRY_URL}/${dockerImageName}:${dockerImageTag}"
+                    
+                    withCredentials([usernamePassword(credentialsId: env.CREDENTIALS_ID, passwordVariable: 'GITLAB_PASSWORD', usernameVariable: 'GITLAB_USERNAME')]) {
+                        sh """
+                            echo "$GITLAB_PASSWORD" | docker login -u "$GITLAB_USERNAME" --password-stdin $DOCKER_REGISTRY
+                            docker pull $dockerImage
+                        """
+                    }
+                    sh """
+                        docker tag $dockerImage ${localDockerImage}
+                    """
+                    withCredentials([usernamePassword(credentialsId: env.LOCAL_REGISTRY_CREDENTIALS, passwordVariable: 'LOCAL_REGISTRY_PASSWORD', usernameVariable: 'LOCAL_REGISTRY_USERNAME')]) {
+                        sh """
+                            echo "$LOCAL_REGISTRY_PASSWORD" | docker login -u "$LOCAL_REGISTRY_USERNAME" --password-stdin $LOCAL_REGISTRY_URL
+                            docker push ${localDockerImage}
+                        """
+                    }
+                }
+            }
+        }
+        stage('Deploy to Application Server') {
+            steps {
+                script {
+                    def dockerImageName = params.DOCKER_IMAGE.split('/').last().split(':').first()
+                    def dockerImageTag = params.DOCKER_IMAGE.split(':').last()
+                    def localDockerImage = "${LOCAL_REGISTRY_URL}/${dockerImageName}:${dockerImageTag}"
+                    def serviceName = params.SERVICE_NAME
+                    
+                    withCredentials([usernamePassword(credentialsId: env.APP_SERVER_CREDENTIALS, passwordVariable: 'APP_SERVER_PASSWORD', usernameVariable: 'APP_SERVER_USER')]) {
+                        sh """
+                            sshpass -p '${APP_SERVER_PASSWORD}' ssh -o StrictHostKeyChecking=no -p ${APP_SERVER_SSH_PORT} ${APP_SERVER_USER}@${APP_SERVER_HOST} "
+                            cd \$(dirname ${APP_SERVER_DOCKER_COMPOSE_PATH}) &&
+                            sed -i '/${serviceName}:/,/image:/s|image: .*|image: ${localDockerImage}|' ${APP_SERVER_DOCKER_COMPOSE_PATH} &&
+                            docker compose pull ${serviceName} &&
+                            docker compose up -d ${serviceName}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+}

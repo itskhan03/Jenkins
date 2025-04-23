@@ -1,0 +1,42 @@
+pipeline {
+    agent any
+    parameters {
+        string(name: 'DOCKER_IMAGE', defaultValue: '', description: 'Docker image to pull (e.g., registry.gitlab.com/wavetec-tempest/jwt-auth-server:vn-fix-5)')
+    }
+    environment {
+        DOCKER_REGISTRY = 'registry.gitlab.com'
+        CREDENTIALS_ID = 'gitlab-babar'
+        LOCAL_REGISTRY_URL = '10.101.10.3:5000'  // Remove http:// as docker tag and push does not use http protocol
+        LOCAL_REGISTRY_CREDENTIALS = 'local-registry'
+    }
+    stages {
+        stage('Pull Docker Image') {
+            steps {
+                script {
+                    def dockerImage = params.DOCKER_IMAGE
+                    if (dockerImage == null || dockerImage.trim() == '') {
+                        error 'DOCKER_IMAGE parameter is required.'
+                    }
+                    def dockerImageName = dockerImage.split('/').last().split(':').first()
+                    def dockerImageTag = dockerImage.split(':').last()
+                    def localDockerImage = "${LOCAL_REGISTRY_URL}/${dockerImageName}:${dockerImageTag}"
+                    withCredentials([usernamePassword(credentialsId: env.CREDENTIALS_ID, passwordVariable: 'GITLAB_PASSWORD', usernameVariable: 'GITLAB_USERNAME')]) {
+                        sh """
+                            echo "$GITLAB_PASSWORD" | docker login -u "$GITLAB_USERNAME" --password-stdin $DOCKER_REGISTRY
+                            docker pull $dockerImage
+                        """
+                    }
+                    sh """
+                        docker tag $dockerImage ${localDockerImage}
+                    """
+                    withCredentials([usernamePassword(credentialsId: env.LOCAL_REGISTRY_CREDENTIALS, passwordVariable: 'LOCAL_REGISTRY_PASSWORD', usernameVariable: 'LOCAL_REGISTRY_USERNAME')]) {
+                        sh """
+                            echo "$LOCAL_REGISTRY_PASSWORD" | docker login -u "$LOCAL_REGISTRY_USERNAME" --password-stdin $LOCAL_REGISTRY_URL
+                            docker push ${localDockerImage}
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
