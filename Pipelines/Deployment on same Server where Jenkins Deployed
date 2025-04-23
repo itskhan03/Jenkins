@@ -1,0 +1,65 @@
+pipeline {
+    agent any
+    parameters {
+        string(name: 'DOCKER_IMAGE', defaultValue: '', description: 'Docker image to pull (e.g., registry.gitlab.com/wavetec-tempest/jwt-auth-server:vn-fix-5)')
+        choice(name: 'SERVICE_NAME', choices: ['', 'transaction', 'inventory', 'vendor', 'feedback', 'auth_server', 'portal_backend', 'portal_frontend', 'portal_frontend_ej'], description: 'Select service to update')
+    }
+    environment {
+        DOCKER_REGISTRY = 'registry.gitlab.com'
+        CREDENTIALS_ID = 'gitlab-cred'
+        LOCAL_REGISTRY_URL = '116.203.85.199:5000'
+        LOCAL_REGISTRY_CREDENTIALS = 'local-cr-cred'
+        APP_SERVER_DIR = '/home/Portal'
+        COMPOSE_FILE_NAME = 'docker-compose.yml'
+    }
+    stages {
+        stage('Pull and Push Docker Image') {
+            steps {
+                script {
+                    def dockerImage = params.DOCKER_IMAGE
+                    def serviceName = params.SERVICE_NAME
+                    if (!dockerImage?.trim() || !serviceName?.trim()) {
+                        error 'DOCKER_IMAGE and SERVICE_NAME parameters are required.'
+                    }
+                    def dockerImageName = dockerImage.split('/').last().split(':').first()
+                    def dockerImageTag = dockerImage.split(':').last()
+                    def localDockerImage = "${LOCAL_REGISTRY_URL}/${dockerImageName}:${dockerImageTag}"
+                    
+                    withCredentials([usernamePassword(credentialsId: env.CREDENTIALS_ID, passwordVariable: 'GITLAB_PASSWORD', usernameVariable: 'GITLAB_USERNAME')]) {
+                        sh """
+                            echo "$GITLAB_PASSWORD" | docker login -u "$GITLAB_USERNAME" --password-stdin $DOCKER_REGISTRY
+                            docker pull $dockerImage
+                        """
+                    }
+
+                    sh "docker tag $dockerImage ${localDockerImage}"
+
+                    withCredentials([usernamePassword(credentialsId: env.LOCAL_REGISTRY_CREDENTIALS, passwordVariable: 'LOCAL_REGISTRY_PASSWORD', usernameVariable: 'LOCAL_REGISTRY_USERNAME')]) {
+                        sh """
+                            echo "$LOCAL_REGISTRY_PASSWORD" | docker login -u "$LOCAL_REGISTRY_USERNAME" --password-stdin $LOCAL_REGISTRY_URL
+                            docker push ${localDockerImage}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Application Server') {
+            steps {
+                script {
+                    def dockerImageName = params.DOCKER_IMAGE.split('/').last().split(':').first()
+                    def dockerImageTag = params.DOCKER_IMAGE.split(':').last()
+                    def localDockerImage = "${LOCAL_REGISTRY_URL}/${dockerImageName}:${dockerImageTag}"
+                    def serviceName = params.SERVICE_NAME
+
+                    sh """
+                        cd ${APP_SERVER_DIR}
+                        sed -i '/${serviceName}:/,/image:/s|image: .*|image: ${localDockerImage}|' ${COMPOSE_FILE_NAME}
+                        docker compose -f ${COMPOSE_FILE_NAME} pull ${serviceName}
+                        docker compose -f ${COMPOSE_FILE_NAME} up -d ${serviceName}
+                    """
+                }
+            }
+        }
+    }
+}
